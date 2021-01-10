@@ -116,6 +116,12 @@ def main():
                 packet = serverbound.play.ClientStatusPacket()
                 packet.action_id = serverbound.play.ClientStatusPacket.RESPAWN
                 connection.write_packet(packet)
+            if text.startswith("/say "):
+                text_body = text[5:]
+                print("saying...", text_body)
+                packet = serverbound.play.ChatPacket()
+                packet.message = text_body
+                connection.write_packet(packet)
             else:
                 packet = serverbound.play.ChatPacket()
                 packet.message = text
