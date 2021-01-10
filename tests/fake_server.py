@@ -1,4 +1,4 @@
-from __future__ import print_function
+import pynbt
 
 from minecraft import SUPPORTED_MINECRAFT_VERSIONS
 from minecraft.networking import connection
@@ -11,7 +11,6 @@ from minecraft.networking.encryption import (
 )
 
 from cryptography.hazmat.primitives.asymmetric.padding import PKCS1v15
-from future.utils import raise_
 
 from numbers import Integral
 import unittest
@@ -24,9 +23,6 @@ import zlib
 import hashlib
 import uuid
 
-
-VERSIONS = sorted(SUPPORTED_MINECRAFT_VERSIONS.items(), key=lambda i: i[1])
-VERSIONS = [v for (v, p) in VERSIONS]
 
 THREAD_TIMEOUT_S = 2
 
@@ -74,10 +70,22 @@ class FakeClientHandler(object):
         # Communicate with the client until disconnected.
         try:
             self._run_handshake()
-            self.socket.shutdown(socket.SHUT_RDWR)
+            try:
+                self.socket.shutdown(socket.SHUT_RDWR)
+            except IOError:
+                pass
+        except (FakeClientDisconnect, BrokenPipeError) as exc:
+            if not self.handle_abnormal_disconnect(exc):
+                raise
         finally:
             self.socket.close()
             self.socket_file.close()
+
+    def handle_abnormal_disconnect(self, exc):
+        # Called when the client disconnects in an abnormal fashion. If this
+        # handler returns True, the error is ignored and is treated as a normal
+        # disconnection.
+        return False
 
     def handle_connection(self):
         # Called in the handshake state, just after the client connects,
@@ -101,10 +109,46 @@ class FakeClientHandler(object):
 
     def handle_play_start(self):
         # Called upon entering the play state.
-        self.write_packet(clientbound.play.JoinGamePacket(
-            entity_id=0, game_mode=0, dimension=0, hashed_seed=12345,
-            difficulty=2, max_players=1, level_type='default',
-            reduced_debug_info=False, render_distance=9, respawn_screen=False))
+        packet = clientbound.play.JoinGamePacket(
+            entity_id=0, is_hardcore=False, game_mode=0, previous_game_mode=0,
+            world_names=['minecraft:overworld'],
+            world_name='minecraft:overworld',
+            hashed_seed=12345, difficulty=2, max_players=1,
+            level_type='default', reduced_debug_info=False, render_distance=9,
+            respawn_screen=False, is_debug=False, is_flat=False)
+
+        if self.server.context.protocol_later_eq(748):
+            packet.dimension = pynbt.TAG_Compound({
+                'natural': pynbt.TAG_Byte(1),
+                'effects': pynbt.TAG_String('minecraft:overworld'),
+            }, '')
+            packet.dimension_codec = pynbt.TAG_Compound({
+                'minecraft:dimension_type': pynbt.TAG_Compound({
+                    'type': pynbt.TAG_String('minecraft:dimension_type'),
+                    'value': pynbt.TAG_List(pynbt.TAG_Compound, [
+                        pynbt.TAG_Compound(packet.dimension),
+                    ]),
+                }),
+                'minecraft:worldgen/biome': pynbt.TAG_Compound({
+                    'type': pynbt.TAG_String('minecraft:worldgen/biome'),
+                    'value': pynbt.TAG_List(pynbt.TAG_Compound, [
+                        pynbt.TAG_Compound({
+                            'id': pynbt.TAG_Int(1),
+                            'name': pynbt.TAG_String('minecraft:plains'),
+                        }),
+                        pynbt.TAG_Compound({
+                            'id': pynbt.TAG_Int(2),
+                            'name': pynbt.TAG_String('minecraft:desert'),
+                        }),
+                    ]),
+                }),
+            }, '')
+        elif self.server.context.protocol_later_eq(718):
+            packet.dimension = 'minecraft:overworld'
+        else:
+            packet.dimension = types.Dimension.OVERWORLD
+
+        self.write_packet(packet)
 
     def handle_play_packet(self, packet):
         # Called upon each packet received after handle_play_start() returns.
@@ -181,7 +225,8 @@ class FakeClientHandler(object):
         try:
             self.handle_connection()
             packet = self.read_packet()
-            assert isinstance(packet, serverbound.handshake.HandShakePacket)
+            assert isinstance(packet, serverbound.handshake.HandShakePacket), \
+                   type(packet)
             self.handle_handshake(packet)
             if packet.next_state == 1:
                 self._run_status()
@@ -196,13 +241,13 @@ class FakeClientHandler(object):
         # Prepare to transition from handshaking to play state (via login),
         # using the given serverbound HandShakePacket to perform play-specific
         # processing.
-        if packet.protocol_version == self.server.context.protocol_version:
+        if self.server.context.protocol_version == packet.protocol_version:
             return self._run_login()
-        if packet.protocol_version < self.server.context.protocol_version:
-            msg = 'Outdated client! Please use %s' \
+        elif self.server.context.protocol_earlier(packet.protocol_version):
+            msg = "Outdated server! I'm still on %s" \
                   % self.server.minecraft_version
         else:
-            msg = "Outdated server! I'm still on %s" \
+            msg = 'Outdated client! Please use %s' \
                   % self.server.minecraft_version
         self.handle_login_server_disconnect(msg)
 
@@ -330,13 +375,13 @@ class FakeServer(object):
                 'minecraft_version', 'client_handler_type', 'server_type', \
                 'packets_handshake', 'packets_login', 'packets_playing', \
                 'packets_status', 'lock', 'stopping', 'private_key', \
-                'public_key_bytes', 'test_case',
+                'public_key_bytes', 'test_case'
 
     def __init__(self, minecraft_version=None, compression_threshold=None,
                  client_handler_type=FakeClientHandler, private_key=None,
                  public_key_bytes=None, test_case=None):
         if minecraft_version is None:
-            minecraft_version = VERSIONS[-1][0]
+            minecraft_version = list(SUPPORTED_MINECRAFT_VERSIONS.keys())[-1]
 
         if isinstance(minecraft_version, Integral):
             proto = minecraft_version
@@ -374,7 +419,7 @@ class FakeServer(object):
         self.listen_socket = socket.socket()
         self.listen_socket.settimeout(0.1)
         self.listen_socket.bind(('localhost', 0))
-        self.listen_socket.listen(0)
+        self.listen_socket.listen(1)
 
         self.lock = threading.Lock()
         self.stopping = False
@@ -422,8 +467,9 @@ class _FakeServerTest(unittest.TestCase):
         must raise a 'FakeServerTestSuccess' exception.
     """
 
-    server_version = VERSIONS[-1]
+    server_version = None
     # The Minecraft version ID that the server will support.
+    # If None, the latest supported version will be used.
 
     client_versions = None
     # The set of Minecraft version IDs or protocol version numbers that the
@@ -507,21 +553,23 @@ class _FakeServerTest(unittest.TestCase):
         client_lock = threading.Lock()
         client_exc_info = [None]
 
+        client = connection_type(
+            addr, port, username='TestUser', allowed_versions=client_versions)
+
+        @client.exception_handler()
         def handle_client_exception(exc, exc_info):
             with client_lock:
                 client_exc_info[0] = exc_info
             with cond:
                 cond.notify_all()
 
-        client = connection_type(
-            addr, port, username='TestUser', allowed_versions=client_versions,
-            handle_exception=handle_client_exception)
-        client.register_packet_listener(
-            lambda packet: logging.debug('[ ->C] %s' % packet),
-            packets.Packet, early=True)
-        client.register_packet_listener(
-            lambda packet: logging.debug('[C-> ] %s' % packet),
-            packets.Packet, early=True, outgoing=True)
+        @client.listener(packets.Packet, early=True)
+        def handle_incoming_packet(packet):
+            logging.debug('[ ->C] %s' % packet)
+
+        @client.listener(packets.Packet, early=True, outgoing=True)
+        def handle_outgoing_packet(packet):
+            logging.debug('[C-> ] %s' % packet)
 
         server_thread = threading.Thread(
             name='FakeServer',
@@ -545,8 +593,6 @@ class _FakeServerTest(unittest.TestCase):
                     if thread is not None and thread.is_alive():
                         errors.append({
                             'msg': 'Thread "%s" timed out.' % thread.name})
-                if client_exc_info[0] is None:
-                    client_exc_info[0] = client.exc_info
         except Exception:
             errors.insert(0, {
                 'msg': 'Exception in main thread',
@@ -576,7 +622,8 @@ class _FakeServerTest(unittest.TestCase):
                 logging.error(**error)
             self.fail('Multiple errors: see logging output.')
         elif errors and 'exc_info' in errors[0]:
-            raise_(*errors[0]['exc_info'])
+            exc_value, exc_tb = errors[0]['exc_info'][1:]
+            raise exc_value.with_traceback(exc_tb)
         elif errors:
             self.fail(errors[0]['msg'])
 
