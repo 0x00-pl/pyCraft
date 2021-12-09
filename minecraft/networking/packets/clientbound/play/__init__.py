@@ -264,7 +264,8 @@ class EntityPositionDeltaPacket(Packet):
 class TimeUpdatePacket(Packet):
     @staticmethod
     def get_id(context):
-        return 0x58 if context.protocol_later_eq(755) else \
+        return 0x59 if context.protocol_later_eq(757) else \
+               0x58 if context.protocol_later_eq(755) else \
                0x4E if context.protocol_later_eq(721) else \
                0x4F if context.protocol_later_eq(550) else \
                0x4E if context.protocol_later_eq(471) else \
@@ -352,6 +353,7 @@ class PlayerListHeaderAndFooterPacket(Packet):
         {'footer': String}]
 
 
+# entity rotation
 class EntityLookPacket(Packet):
     @staticmethod
     def get_id(context):
@@ -385,4 +387,5 @@ class ResourcePackSendPacket(Packet):
     definition = [
         {"url": String},
         {"hash": String}
+        # TODO: Forced and Prompt Message
     ]

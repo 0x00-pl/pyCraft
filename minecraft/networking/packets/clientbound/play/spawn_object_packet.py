@@ -7,6 +7,7 @@ from minecraft.networking.types import (
 )
 
 
+# spawn entity
 class SpawnObjectPacket(Packet):
     @staticmethod
     def get_id(context):
